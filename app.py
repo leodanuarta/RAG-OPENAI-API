@@ -1,57 +1,36 @@
-import os
-import time
+from flask import Flask, request, jsonify
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
-from datasets import load_dataset
-import pinecone
-from tqdm.auto import tqdm
 from pinecone import Pinecone as PineconeClient, ServerlessSpec
-from flask import Flask, request, jsonify
+from fitz import open as open_pdf
+import os
+import time
 
 app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = './uploads'
 
 class Chatbot:
     def __init__(self):
         os.environ["OPENAI_API_KEY"] = "sk-proj-dUFywzoCHYLXpcrGgDwwT3BlbkFJDKhmcIsnRdqNadSE2Fow"
         self.chat = ChatOpenAI(openai_api_key=os.environ["OPENAI_API_KEY"], model="gpt-3.5-turbo")
+        self.knowledge_base = KnowledgeBase()
+        self.vector_store = self.knowledge_base.vector_store
 
     def generate_response(self, messages):
         response = self.chat(messages)
-        return response
-
-class DataProcessor:
-    def __init__(self, dataset_name):
-        try:
-            self.dataset = load_dataset(dataset_name, split="train")
-        except KeyError:
-            raise ValueError(f"Dataset '{dataset_name}' tidak ditemukan. Mohon periksa nama dataset dan coba lagi.")
-
-    def process_data(self):
-        return self.dataset.to_pandas()
-
-class KnowledgeBase:
-    def __init__(self):
-        self.api_key = os.environ.get('PINECONE_API_KEY')
-        self.pc = PineconeClient(api_key=self.api_key)
-        self.spec = ServerlessSpec(cloud="aws", region="us-east-1")
-        self.index_name = "llama-2-rag-python"
-
-    def create_index(self):
-        existing_indexes = self.pc.list_indexes()
-        if len(existing_indexes) >= 5:
-            self.pc.delete_index(existing_indexes[0]['name'])
-        if self.index_name not in [index['name'] for index in existing_indexes]:
-            self.pc.create_index(self.index_name, dimension=1536, metric='dotproduct', spec=self.spec)
-            while not self.pc.describe_index(self.index_name).status['ready']:
-                time.sleep(1)
-        
-        index_description = self.pc.describe_index(self.index_name)
-        print("Deskripsi indeks:", index_description)
-
-    def delete_index(self):
-        self.pc.delete_index(self.index_name)
+        return response.content if response else "Tidak ada respons"
+    
+    def generate_response_with_knowledge(self, messages):
+        query = messages[-1].content
+        query_processor = QueryProcessor(self.vector_store)
+        top_results = query_processor.get_top_results([query])
+        # Pastikan kita menangani situasi di mana 'content' tidak ada di metadata
+        knowledge_content = " ".join([res.metadata.get('content', '') for res in top_results if 'content' in res.metadata])
+        combined_messages = messages + [SystemMessage(content=knowledge_content)]
+        final_response = self.chat(combined_messages)
+        return final_response.content if final_response else "Tidak ada respons"
 
 class QueryProcessor:
     def __init__(self, vector_store):
@@ -64,26 +43,49 @@ class QueryProcessor:
             return results
         except ValueError as ve:
             print("Kesalahan dalam memproses query:", ve)
+            return []
         except Exception as e:
             print("Terjadi kesalahan yang tidak terduga:", e)
+            return []
 
-def store_data_in_pinecone(data, embed_model, index):
-    batch_size = 100
+class KnowledgeBase:
+    def __init__(self):
+        self.api_key = os.environ.get('PINECONE_API_KEY')
+        self.pc = PineconeClient(api_key=self.api_key)
+        self.index_name = "llama-2-rag-python"
+        self.vector_store = self.create_vector_store()
 
-    for i in tqdm(range(0, len(data), batch_size)):
-        i_end = min(len(data), i+batch_size)
-        batch = data.iloc[i:i_end]
-        ids = [f"{x['doi']}-{x['chunk-id']}" for i, x in batch.iterrows()]
-        texts = [x['chunk'] for _, x in batch.iterrows()]
-        embeds = embed_model.embed_documents(texts)
-        metadata = [
-            {'text': x['chunk'],
-            'source': x['source'],
-            'title': x['title']} for i, x in batch.iterrows()
-        ]
-        index.upsert(vectors=zip(ids, embeds, metadata))
+    def create_index(self):
+        existing_indexes = self.pc.list_indexes()
+        if len(existing_indexes) >= 5:
+            self.pc.delete_index(existing_indexes[0]['name'])
+        if self.index_name not in [index['name'] for index in existing_indexes]:
+            spec = ServerlessSpec(cloud="aws", region="us-east-1")
+            self.pc.create_index(self.index_name, dimension=1536, metric='dotproduct', spec=spec)
+            while not self.pc.describe_index(self.index_name).status['ready']:
+                time.sleep(1)
+            print("Indeks telah dibuat.")
+        else:
+            print("Indeks sudah ada.")
+        return PineconeVectorStore(index=self.pc.Index(self.index_name), embedding=OpenAIEmbeddings(model="text-embedding-ada-002"))
 
-@app.route('/ask', methods=['POST'])
+    def create_vector_store(self):
+        self.create_index()
+        return PineconeVectorStore(index=self.pc.Index(self.index_name), embedding=OpenAIEmbeddings(model="text-embedding-ada-002"))
+
+    def add_document(self, document_id, content):
+        # Menambahkan dokumen ke Pinecone dengan kunci 'content'
+        embedding = OpenAIEmbeddings(model="text-embedding-ada-002").embed_text(content)
+        self.pc.upsert(index=self.index_name, vectors=[{'id': document_id, 'values': embedding, 'metadata': {'content': content}}])
+
+def extract_text_from_pdf(pdf_path):
+    with open_pdf(pdf_path) as doc:
+        text = ""
+        for page in doc:
+            text += page.get_text()
+    return text
+
+@app.route('/tanya', methods=['POST'])
 def ask_question():
     data = request.get_json()
     question = data.get('question')
@@ -96,52 +98,49 @@ def ask_question():
         HumanMessage(content=question)
     ]
     
-    response = chatbot.generate_response(messages)
-    response_content = response.content if response else "Tidak ada respons"
+    # Get response from the chatbot using RAG method
+    response = chatbot.generate_response_with_knowledge(messages)
     
-    return jsonify({'response': response_content})
+    # Process query with vector store to get top results
+    query_processor = QueryProcessor(chatbot.vector_store)
+    top_results = query_processor.get_top_results([question])
+    serializable_results = [{'metadata': res.metadata} for res in top_results]
 
-@app.route('/welcome', methods=['GET'])
+    return jsonify({'response': response, 'top_results': serializable_results})
+
+@app.route('/sambutan', methods=['GET'])
 def welcome_message():
     chatbot = Chatbot()
     messages = [
         SystemMessage(content="Anda adalah asisten yang membantu."),
-        HumanMessage(content="Apa yang bisa kamu bantu ?")
+        HumanMessage(content="Berikan pesan sambutan.")
     ]
     
     response = chatbot.generate_response(messages)
-    response_content = response.content if response else "Tidak ada respons"
     
-    return jsonify({'response': response_content})
+    return jsonify({'response': response})
 
-def main():
-    chatbot = Chatbot()
-    dataset_name = "jamescalam/llama-2-arxiv-papers-chunked"
+@app.route('/upload_pdf', methods=['POST'])
+def upload_pdf():
+    if 'file' not in request.files:
+        return jsonify({'error': 'Tidak ada file yang diunggah'}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'Nama file kosong'}), 400
     
-    try:
-        data_processor = DataProcessor(dataset_name)
-        data = data_processor.process_data()
-        print(data.head())
-        print(data.columns)
-    except ValueError as e:
-        print(e)
-        return
-
-    knowledge_base = KnowledgeBase()
-    knowledge_base.create_index()
-
-    embed_model = OpenAIEmbeddings(model="text-embedding-ada-002")
-
-    index = knowledge_base.pc.Index(knowledge_base.index_name)
-    
-    vector_store = PineconeVectorStore(index=index, embedding=embed_model)
-
-    query_processor = QueryProcessor(vector_store)
-
-    queries = ["Apa yang istimewa dari Llama 2?", "Bagaimana cara kerjanya?", "Ceritakan tentang nanas"]
-    for query in queries:
-        top_results = query_processor.get_top_results([query])
-        print(f"Hasil untuk query '{query}': {top_results}")
+    if file and file.filename.endswith('.pdf'):
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        file.save(file_path)
+        text = extract_text_from_pdf(file_path)
+        
+        # Add extracted text to Pinecone
+        knowledge_base = KnowledgeBase()
+        document_id = file.filename
+        knowledge_base.add_document(document_id, text)
+        
+        return jsonify({'text': text})
+    else:
+        return jsonify({'error': 'Format file tidak didukung'}), 400
 
 if __name__ == "__main__":
     app.run(debug=True)
