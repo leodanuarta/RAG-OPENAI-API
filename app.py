@@ -1,4 +1,6 @@
 from flask import Flask, request, jsonify
+from flask_caching import Cache
+from concurrent.futures import ThreadPoolExecutor
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import OpenAIEmbeddings
@@ -10,27 +12,52 @@ import time
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = './uploads'
+app.config['CACHE_TYPE'] = 'simple'  # Simpel caching menggunakan dictionary
+cache = Cache(app)
+executor = ThreadPoolExecutor()
+
+messages = [
+    SystemMessage(content="You are a helpful assistant."),
+    HumanMessage(content="Hi AI, how are you today ?"),
+    AIMessage(content="I'm great, thank you. How can I help you ?"),
+    HumanMessage(content="I'd like to understand string theory.")
+]
 
 class Chatbot:
     def __init__(self):
-        os.environ["OPENAI_API_KEY"] = "sk-proj-dUFywzoCHYLXpcrGgDwwT3BlbkFJDKhmcIsnRdqNadSE2Fow"
         self.chat = ChatOpenAI(openai_api_key=os.environ["OPENAI_API_KEY"], model="gpt-3.5-turbo")
         self.knowledge_base = KnowledgeBase()
         self.vector_store = self.knowledge_base.vector_store
+        self.conversation_memory = {}  # In-memory storage for conversation history
 
-    def generate_response(self, messages):
+    def generate_response(self, user_id, messages):
+        if user_id in self.conversation_memory:
+            messages = self.conversation_memory[user_id] + messages
         response = self.chat(messages)
+        if response:
+            self.update_memory(user_id, messages, response)
         return response.content if response else "Tidak ada respons"
     
-    def generate_response_with_knowledge(self, messages):
+    def generate_response_with_knowledge(self, user_id, messages):
         query = messages[-1].content
         query_processor = QueryProcessor(self.vector_store)
         top_results = query_processor.get_top_results([query])
-        # Pastikan kita menangani situasi di mana 'content' tidak ada di metadata
-        knowledge_content = " ".join([res.metadata.get('content', '') for res in top_results if 'content' in res.metadata])
-        combined_messages = messages + [SystemMessage(content=knowledge_content)]
+        
+        knowledge_content = " ".join([res.metadata.get('content', '') for res in top_results])
+        combined_messages = messages + [SystemMessage(content=f"Informasi tambahan: {knowledge_content}")]
+        
+        if user_id in self.conversation_memory:
+            combined_messages = self.conversation_memory[user_id] + combined_messages
+
         final_response = self.chat(combined_messages)
+        if final_response:
+            self.update_memory(user_id, combined_messages, final_response)
         return final_response.content if final_response else "Tidak ada respons"
+
+    def update_memory(self, user_id, messages, response):
+        if user_id not in self.conversation_memory:
+            self.conversation_memory[user_id] = []
+        self.conversation_memory[user_id].extend(messages + [AIMessage(content=response.content)])
 
 class QueryProcessor:
     def __init__(self, vector_store):
@@ -74,7 +101,6 @@ class KnowledgeBase:
         return PineconeVectorStore(index=self.pc.Index(self.index_name), embedding=OpenAIEmbeddings(model="text-embedding-ada-002"))
 
     def add_document(self, document_id, content):
-        # Menambahkan dokumen ke Pinecone dengan kunci 'content'
         embedding = OpenAIEmbeddings(model="text-embedding-ada-002").embed_text(content)
         self.pc.upsert(index=self.index_name, vectors=[{'id': document_id, 'values': embedding, 'metadata': {'content': content}}])
 
@@ -88,20 +114,23 @@ def extract_text_from_pdf(pdf_path):
 @app.route('/tanya', methods=['POST'])
 def ask_question():
     data = request.get_json()
+    user_id = data.get('user_id')
     question = data.get('question')
-    if not question:
-        return jsonify({'error': 'Pertanyaan diperlukan'}), 400
-    
+    if not user_id or not question:
+        return jsonify({'error': 'User ID dan pertanyaan diperlukan'}), 400
+
     chatbot = Chatbot()
     messages = [
         SystemMessage(content="Anda adalah asisten yang membantu."),
         HumanMessage(content=question)
     ]
-    
-    # Get response from the chatbot using RAG method
-    response = chatbot.generate_response_with_knowledge(messages)
-    
-    # Process query with vector store to get top results
+
+    response = cache.get(f"{user_id}_response")
+    if response is None:
+        future = executor.submit(chatbot.generate_response_with_knowledge, user_id, messages)
+        response = future.result()
+        cache.set(f"{user_id}_response", response, timeout=300)  # Cache response for 5 minutes
+
     query_processor = QueryProcessor(chatbot.vector_store)
     top_results = query_processor.get_top_results([question])
     serializable_results = [{'metadata': res.metadata} for res in top_results]
@@ -116,7 +145,7 @@ def welcome_message():
         HumanMessage(content="Berikan pesan sambutan.")
     ]
     
-    response = chatbot.generate_response(messages)
+    response = chatbot.generate_response('welcome', messages)
     
     return jsonify({'response': response})
 
@@ -133,7 +162,6 @@ def upload_pdf():
         file.save(file_path)
         text = extract_text_from_pdf(file_path)
         
-        # Add extracted text to Pinecone
         knowledge_base = KnowledgeBase()
         document_id = file.filename
         knowledge_base.add_document(document_id, text)
