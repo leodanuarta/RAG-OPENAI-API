@@ -7,7 +7,6 @@ from pinecone import Pinecone, ServerlessSpec
 from tqdm.auto import tqdm
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.vectorstores import Pinecone as VectorPinecone
-from datasets import load_dataset
 
 # Inisialisasi aplikasi Flask
 app = Flask(__name__)
@@ -34,7 +33,7 @@ def create_index_knowledge():
     pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
     spec = ServerlessSpec(cloud="aws", region="us-east-1")
 
-    index_name = "llama-2-rag-python-tes"
+    index_name = "llama-2-rag-python"
     existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
 
     # Cek apakah indeks sudah ada
@@ -50,17 +49,10 @@ def create_index_knowledge():
     index.describe_index_stats()
     return index
 
-@app.route("/trainlabira", methods=["GET"])
 def upsert_knowledge():
     index = create_index_knowledge()
-    # Dummy data
+    data = ""  # Dummy data
 
-    dataset = load_dataset(
-        "jamescalam/llama-2-arxiv-papers-chunked",
-        split="train"
-    )
-
-    data = dataset.to_pandas() 
     batch_size = 100
     for i in tqdm(range(0, len(data), batch_size)):
         i_end = min(len(data), i + batch_size)
@@ -71,8 +63,6 @@ def upsert_knowledge():
         metadata = [{'text': x['chunk'], 'source': x['source'], 'title': x['title']} for _, x in batch.iterrows()]
 
         index.upsert(vectors=zip(ids, embeds, metadata))
-    
-    return jsonify({"text": "Berhasil memasukkan data ke vectordb"}), 200
 
 def augment_prompt(query: str):
     index = create_index_knowledge()
@@ -80,7 +70,7 @@ def augment_prompt(query: str):
     vectorstore = VectorPinecone(index, embed_model.embed_query, text_field)
     results = vectorstore.similarity_search(query, k=3)
     source_knowledge = "\n".join([x.page_content for x in results])
-    augmented_prompt = f"""You are a helpful assistant. If the question below requires specific knowledge, use the context provided. Otherwise, answer the question directly.
+    augmented_prompt = f"""Using the context below, answer the query.
 
     Contexts:
     {source_knowledge}
@@ -96,9 +86,7 @@ def querying_question():
     if not query:
         return jsonify({'error': '[ERROR] Question Needed'}), 400
 
-    # Hybrid prompting approach
     prompt = HumanMessage(content=augment_prompt(query))
-
     response = chat(initial_messages + [prompt])
     return jsonify({'text': response.content}), 200
 
