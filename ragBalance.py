@@ -5,6 +5,7 @@ import time
 import uuid
 import PyPDF2
 from flask import Flask, request, jsonify
+from flask_cors import CORS # Import Flask-CORS
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from pinecone import Pinecone, ServerlessSpec
@@ -15,10 +16,12 @@ from datasets import load_dataset
 import fitz  # PyMuPDF
 import openai
 from PyPDF2 import PdfReader
-
+from flask_cors import CORS
 
 # Inisialisasi aplikasi Flask
 app = Flask(__name__)
+# CORS(app)  # Tambahkan ini untuk mengaktifkan CORS
+CORS(app)
 
 # Direktori untuk menyimpan file PDF
 UPLOAD_FOLDER = 'uploaded_files'
@@ -141,21 +144,12 @@ def upsert_knowledge_pdf():
         # Memecah teks menjadi paragraf atau bagian yang lebih kecil (opsional)
         text_segments = text.split("\n\n")  # Misalnya, memecah berdasarkan dua baris baru
 
-        # response = openai.Embedding.create(
-        #     model="text-embedding-ada-002",
-        #     input=text
-        # )
-
         embeddings = embed_model.embed_documents(text_segments)
-
-        
 
         document_id = str(uuid.uuid4())
 
         # Ensure we have the same number of embeddings and text segments
         assert len(embeddings) == len(text_segments), "Mismatch between embeddings and text segments"
-
-        # embeddings = [item['embedding'] for item in response.data]
 
         for i, (embedding, segment) in enumerate(tqdm(zip(embeddings, text_segments), desc="Upserting to Pinecone", total=len(text_segments))):
             metadata = {
