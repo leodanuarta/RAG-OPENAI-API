@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.vectorstores import Pinecone as VectorPinecone
 from datasets import load_dataset
-import fitz  # PyMuPDF
+# import fitz  # PyMuPDF
 import openai
 from PyPDF2 import PdfReader
 from flask_cors import CORS
@@ -203,4 +203,5 @@ def querying_question():
     return jsonify({'text': response.content}), 200
 
 if __name__ == "__main__":
+    print(os.getenv("OPENAI_API_KEY"))
     app.run(debug=True)
