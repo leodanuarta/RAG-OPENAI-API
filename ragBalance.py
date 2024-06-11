@@ -17,6 +17,9 @@ from datasets import load_dataset
 import openai
 from PyPDF2 import PdfReader
 from flask_cors import CORS
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Inisialisasi aplikasi Flask
 app = Flask(__name__)
@@ -47,12 +50,13 @@ initial_messages = [
 # Embedding model
 embed_model = OpenAIEmbeddings(model="text-embedding-ada-002")
 
-def create_index_knowledge():
+def create_index_knowledge(indexName: str):
     # Konfigurasi klien Pinecone
     pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
     spec = ServerlessSpec(cloud="aws", region="us-east-1")
 
-    index_name = "llama-2-rag-python-tespdf"
+    # index_name = "llama-2-rag-python-tespdf"
+    index_name = indexName
     existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
 
     # Koneksi ke indeks jika sudah ada
@@ -116,9 +120,56 @@ def clean_text(text):
     cleaned_text = re.sub(r'\s+', ' ', cleaned_text)  # Mengganti spasi berlebih dengan satu spasi
     return cleaned_text.strip()
 
+
+def chunk_text(text, max_tokens):
+    words = text.split()
+    chunks = []
+    current_chunk = []
+
+    for word in words:
+        if len(current_chunk) + len(word) + 1 > max_tokens:
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [word]
+        else:
+            current_chunk.append(word)
+    
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+
+    return chunks
+
+def recursive_chunk(segment, embed_model, max_payload_size=40960):
+    chunks = chunk_text(segment, max_tokens=500)  # Initial chunk size estimate
+    embeddings = embed_model.embed_documents(chunks)
+
+    final_chunks = []
+    final_embeddings = []
+
+    for chunk, embedding in zip(chunks, embeddings):
+        embedding_size = len(embedding) * 8  # Each float is 8 bytes
+
+        if embedding_size > max_payload_size:
+            sub_chunks, sub_embeddings = recursive_chunk(chunk, embed_model, max_payload_size)
+            final_chunks.extend(sub_chunks)
+            final_embeddings.extend(sub_embeddings)
+        else:
+            final_chunks.append(chunk)
+            final_embeddings.append(embedding)
+
+    return final_chunks, final_embeddings
+
 @app.route('/kasihlabira', methods=["POST"])
 def upsert_knowledge_pdf():
     openai.api_key = os.getenv('OPENAI_API_KEY')
+    
+    index_name =request.args.get("index_name")
+    namespace = request.args.get("namespace")
+
+    if not index_name:
+        return jsonify({'error': "[ERROR] request `index_name` tidak ditemukan"}), 400
+    
+    if not namespace:
+        return jsonify({'error': "[ERROR] request `namespace` tidak ditemukan"}), 400
 
     if 'file' not in request.files:
         return jsonify({"error": "Body `file` tidak ditemukan" }), 400
@@ -137,7 +188,7 @@ def upsert_knowledge_pdf():
 
         pdf_content = extract_text_from_pdf(file)
         title, author = get_pdf_metadata(file_path)
-        index = create_index_knowledge()
+        index = create_index_knowledge(index_name)
 
         text = clean_text(pdf_content)
 
@@ -151,7 +202,36 @@ def upsert_knowledge_pdf():
         # Ensure we have the same number of embeddings and text segments
         assert len(embeddings) == len(text_segments), "Mismatch between embeddings and text segments"
 
-        for i, (embedding, segment) in enumerate(tqdm(zip(embeddings, text_segments), desc="Upserting to Pinecone", total=len(text_segments))):
+        # for i, (embedding, segment) in enumerate(tqdm(zip(embeddings, text_segments), desc="Upserting to Pinecone", total=len(text_segments))):
+            # metadata = {
+            #     'document_id': document_id,
+            #     'page_number': i,
+            #     'paragraph_number': i,
+            #     'source': file.filename,
+            #     'title': title,
+            #     'author': author,
+            #     'text': segment
+            # }
+            # # Ensure embedding is a flat list of floats
+            # if any(isinstance(item, list) for item in embedding):
+            #     embedding = list(chain.from_iterable(embedding))
+            # try:
+            #     embedding = [float(value) for value in embedding]
+            # except ValueError as e:
+            #     print(f"Error converting embedding to float: {e}")
+            #     print(f"Embedding: {embedding}")
+            #     continue  # Skip this embedding if it cannot be converted
+            # index.upsert(vectors=[(f'{document_id}_{i}', embedding, metadata)], namespace=namespace)
+    
+        # Initial chunking of the text
+        text_segments = text.split("\n\n")  # For initial chunking based on paragraphs
+
+        document_id = str(uuid.uuid4())
+
+        for segment in tqdm(text_segments, desc="Upserting to Pinecone"):
+            sub_chunks, sub_embeddings = recursive_chunk(segment, embed_model)
+
+        for i, (embedding, sub_chunk) in enumerate(zip(sub_embeddings, sub_chunks)):
             metadata = {
                 'document_id': document_id,
                 'page_number': i,
@@ -159,19 +239,17 @@ def upsert_knowledge_pdf():
                 'source': file.filename,
                 'title': title,
                 'author': author,
-                'text': segment
+                'text': sub_chunk
             }
             # Ensure embedding is a flat list of floats
-            if any(isinstance(item, list) for item in embedding):
-                embedding = list(chain.from_iterable(embedding))
             try:
                 embedding = [float(value) for value in embedding]
+                index.upsert(vectors=[(f'{document_id}_{i}', embedding, metadata)], namespace=namespace)
             except ValueError as e:
                 print(f"Error converting embedding to float: {e}")
                 print(f"Embedding: {embedding}")
                 continue  # Skip this embedding if it cannot be converted
-            index.upsert(vectors=[(f'{document_id}_{i}', embedding, metadata)])
-    
+
     return jsonify({"text": "Berhasil mempelajari data pdf " + file.filename}), 200
 
 def augment_prompt(query: str):
@@ -203,5 +281,4 @@ def querying_question():
     return jsonify({'text': response.content}), 200
 
 if __name__ == "__main__":
-    print(os.getenv("OPENAI_API_KEY"))
     app.run(debug=True)
