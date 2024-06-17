@@ -252,8 +252,8 @@ def upsert_knowledge_pdf():
 
     return jsonify({"text": "Berhasil mempelajari data pdf " + file.filename}), 200
 
-def augment_prompt(query: str):
-    index = create_index_knowledge()
+def augment_prompt(query: str, indexname: str):
+    index = create_index_knowledge(indexname)
     text_field = "text"
     vectorstore = VectorPinecone(index, embed_model.embed_query, text_field)
     results = vectorstore.similarity_search(query, k=3)
@@ -270,12 +270,13 @@ def augment_prompt(query: str):
 def querying_question():
     body = request.get_json()
     query = body.get("question")
+    indexname = body.get("index_name")
 
     if not query:
         return jsonify({'error': '[ERROR] Question Needed'}), 400
 
     # Hybrid prompting approach
-    prompt = HumanMessage(content=augment_prompt(query))
+    prompt = HumanMessage(content=augment_prompt(query, indexname))
 
     response = chat(initial_messages + [prompt])
     return jsonify({'text': response.content}), 200
