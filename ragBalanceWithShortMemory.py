@@ -4,7 +4,7 @@ import re
 import time
 import uuid
 import PyPDF2
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from flask_cors import CORS # Import Flask-CORS
 from langchain.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
@@ -15,7 +15,6 @@ from langchain.vectorstores import Pinecone as VectorPinecone
 from datasets import load_dataset
 import openai
 from PyPDF2 import PdfReader
-from flask_cors import CORS
 from dotenv import load_dotenv
 import redis
 import functools
@@ -24,6 +23,7 @@ load_dotenv()
 
 # Inisialisasi aplikasi Flask
 app = Flask(__name__)
+app.secret_key = os.urandom(24) 
 # CORS(app)  # Tambahkan ini untuk mengaktifkan CORS
 CORS(app)
 
@@ -85,7 +85,7 @@ def create_index_knowledge(indexName: str):
     index.describe_index_stats()
     return index
 
-@app.route("/trainlabira", methods=["GET"])
+@app.route("/v1/trainlabira", methods=["GET"])
 def upsert_knowledge():
     index = create_index_knowledge()
     # Dummy data
@@ -178,7 +178,7 @@ def recursive_chunk(segment, embed_model, max_payload_size=40960):
 
     return final_chunks, final_embeddings
 
-@app.route('/kasihlabira', methods=["POST"])
+@app.route('/v1/kasihlabira', methods=["POST"])
 def upsert_knowledge_pdf():
     openai.api_key = os.getenv('OPENAI_API_KEY')
     
@@ -259,7 +259,7 @@ def update_short_term_memory(session_id, new_memory):
     get_redis_client().set(session_id, new_memory)
 
 
-@app.route("/tanyalabira", methods=["POST"])
+@app.route("/v1/tanyalabira", methods=["POST"])
 def querying_question():
     body = request.get_json()
     query, indexname, namespace, session_id = body.get("question"), body.get("index_name"), body.get("namespace"), body.get("session_id")
@@ -278,6 +278,13 @@ def querying_question():
 
     return jsonify({'text': response.content}), 200
 
+
+@app.route("/v1/getsession")
+def generate_user_id():
+    if "user_id" not in session:
+        session["visitor id"] = str(uuid.uuid4())
+    return jsonify({"id:" : str(uuid.uuid4())})
+        
 
 if __name__ == "__main__":
     app.run(debug=True)
