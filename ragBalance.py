@@ -48,7 +48,7 @@ initial_messages = [
 ]
 
 # Embedding model
-embed_model = OpenAIEmbeddings(model="text-embedding-ada-002")
+embed_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
 def create_index_knowledge(indexName: str):
     # Konfigurasi klien Pinecone
@@ -252,6 +252,24 @@ def upsert_knowledge_pdf():
 
     return jsonify({"text": "Berhasil mempelajari data pdf " + file.filename}), 200
 
+def augment_prompt_with_score(query: str, indexname: str, namespace: str):
+    index = create_index_knowledge(indexname)
+    text_field = "text"
+    vectorstore = VectorPinecone(index, embed_model.embed_query, text_field)
+    # results = vectorstore.similarity_search_with_score(query, k=3, namespace=namespace)
+    results = vectorstore.similarity_search_with_score(query, k=3, namespace=namespace)
+    # source_knowledge = "\n".join([x.page_content for x in results])
+    source_knowledge = "\n".join([f"Context : {x.page_content}, Score: {score}" for x, score in results])
+
+    # augmented_prompt = f"""You are a helpful assistant. If the question below requires specific knowledge, use the context provided. Otherwise, answer the question directly.
+    augmented_prompt = f"""You are a trained education assistant. Use the context provided with score upper 0.5 and answer the question directly. Otherwise, answer Maaf RAGibran tidak mengerti atau silahkan chat di topik yang berbeda.
+
+    Contexts:
+    {source_knowledge}
+
+    Query: {query}"""
+    return augmented_prompt, results
+
 def augment_prompt(query: str, indexname: str, namespace: str):
     index = create_index_knowledge(indexname)
     text_field = "text"
@@ -265,6 +283,33 @@ def augment_prompt(query: str, indexname: str, namespace: str):
 
     Query: {query}"""
     return augmented_prompt
+
+@app.route("/tanyalabirascore", methods=["POST"])
+def querying_question_with_score():
+    body = request.get_json()
+    query = body.get("question")
+    indexname = body.get("index_name")
+    namespace = body.get("namespace")
+
+    if not query:
+        return jsonify({'error': '[ERROR] `question` required'}), 400
+    
+    if not indexname:
+        return jsonify({'error': '[ERROR] `index_name` required'}), 400
+    
+    if not namespace:
+        return jsonify({'error': '[ERROR] `namespace` required'}), 400
+
+    # Hybrid prompting approach
+    # prompt = HumanMessage(content=augment_prompt(query, indexname, namespace))
+    augment_prompt_content, results = augment_prompt_with_score(query, indexname, namespace)
+    prompt = HumanMessage(content=augment_prompt_content)
+
+    search_result = [{"content" : x.page_content, "score" : score} for x, score in results]
+
+    response = chat(initial_messages + [prompt])
+    # return jsonify({'text': response.content}), 200
+    return jsonify({"text" : response.content, "score" : search_result}), 200
 
 @app.route("/tanyalabira", methods=["POST"])
 def querying_question():

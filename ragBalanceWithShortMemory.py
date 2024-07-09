@@ -18,6 +18,9 @@ from PyPDF2 import PdfReader
 from dotenv import load_dotenv
 import redis
 import functools
+from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_text_splitters import CharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 
 load_dotenv()
 
@@ -49,7 +52,7 @@ initial_messages = [
 ]
 
 # Embedding model
-embed_model = OpenAIEmbeddings(model="text-embedding-ada-002")
+embed_model = OpenAIEmbeddings(model="text-embedding-ada-002") # text-embedding-3-large #text-embedding-ada-002
 
 # Inisialisasi Redis client dengan connection pool
 redis_client =redis.ConnectionPool(
@@ -160,7 +163,7 @@ def chunk_text(text, max_tokens):
 
     return chunks
 
-def recursive_chunk(segment, embed_model, max_payload_size=40960):
+def recursive_chunk(segment, embed_model, max_payload_size=4096):
     chunks = chunk_text(segment, max_tokens=500)  # Initial chunk size estimate
     embeddings = embed_model.embed_documents(chunks)
     final_chunks, final_embeddings = []
@@ -235,21 +238,60 @@ def upsert_knowledge_pdf():
 
     return jsonify({"text": "Berhasil mempelajari data pdf " + file.filename}), 200
 
+
+
+@app.route('/v1/teshfembeds', methods=["GET"])
+def langchainTextSplitter() :
+    path = "uploaded_files\Kelas3_Pendidikan_Jasmani_Olahraga_dan_Kesehatan_1218.pdf"
+    loader = PyPDFDirectoryLoader(path)
+    documents = loader.load()
+
+    text_splitter = CharacterTextSplitter(chunk_size=7000, chunk_overlap=700, separator="\n")
+    source_docs = text_splitter.split_documents(documents)
+
+    # text = clean_text(source_docs)
+
+    # embeddings = embed_model.embed_documents(source_docs)
+    model_name = "BAII/bge-small-en"
+    model_kwargs = {"device": "cpu"}
+    encode_kwargs = {"normalize_embeddings" : True}
+
+    hf = HuggingFaceBgeEmbeddings(
+        model_name = model_name,
+        model_kwargs = model_kwargs,
+        encode_kwargs = encode_kwargs
+    )
+
+    index = create_index_knowledge("labira-edu-rag-dataset-tes")
+
+    for i in tqdm(range(0, len(source_docs))):
+        ids = 1000 + i
+        embeds = hf.embed_documents(source_docs)
+
+        index.upsert(vectors=zip(ids, embeds))
+
+    
+    return jsonify({"text": "Berhasil memasukkan data ke vectordb"}), 200
+
+
 # Fungsi untuk caching prompt uang sudah di augment
 @functools.lru_cache(maxsize=128)
 def augment_prompt(query: str, indexname: str, namespace: str):
     index = create_index_knowledge(indexname)
     text_field = "text"
     vectorstore = VectorPinecone(index, embed_model.embed_query, text_field)
-    results = vectorstore.similarity_search(query, k=3, namespace=namespace)
-    source_knowledge = "\n".join([x.page_content for x in results])
+    results= vectorstore.similarity_search_with_score(query, k=3, namespace=namespace)
+    print("result : ", results)
+    # source_knowledge = "\n".join([x.page_content for x, score in results])
+    source_knowledge = "\n".join([f"Context : {x.page_content}, Score: {score}" for x, score in results])
     augmented_prompt = f"""You are a helpful assistant. If the question below requires specific knowledge, use the context provided. Otherwise, answer the question directly.
+
 
     Contexts:
     {source_knowledge}
 
     Query: {query}"""
-    return augmented_prompt
+    return augmented_prompt, results
 
 
 def get_short_term_memory(session_id):
@@ -269,14 +311,25 @@ def querying_question():
     
     short_term_memory = get_short_term_memory(session_id)
     # Hybrid prompting approach
-    prompt = HumanMessage(content=augment_prompt(query, indexname, namespace))
-    session_messages = initial_messages + [HumanMessage(content=short_term_memory)] if short_term_memory else initial_messages
-    response = chat(session_messages + [prompt])
+    augment_prompt_content, results = augment_prompt(query, indexname, namespace)
+    prompt = HumanMessage(content=augment_prompt_content)
+    session_message = initial_messages + [HumanMessage(content=short_term_memory)] if short_term_memory else initial_messages
+    response = chat(session_message + [prompt])
 
     new_memory = str(short_term_memory, encoding="utf-8") + "\n" + response.content
     update_short_term_memory(session_id, new_memory)
 
-    return jsonify({'text': response.content}), 200
+    search_result = [{"content" : x.page_content, "score" : score} for x, score in results]
+
+    # prompt = HumanMessage(content=augment_prompt(query, indexname, namespace))
+    # session_messages = initial_messages + [HumanMessage(content=short_term_memory)] if short_term_memory else initial_messages
+    # response = chat(session_messages + [prompt])
+
+    # new_memory = str(short_term_memory, encoding="utf-8") + "\n" + response.content
+    # update_short_term_memory(session_id, new_memory)
+
+    return jsonify({"text" : response.content, "score" : search_result})
+    # return jsonify({'text': response.content, 'results': results_with_scores}), 200
 
 
 @app.route("/v1/getsession")
