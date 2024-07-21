@@ -48,7 +48,8 @@ initial_messages = [
 ]
 
 # Embedding model
-embed_model = OpenAIEmbeddings(model="text-embedding-3-small")
+# embed_model = OpenAIEmbeddings(model="text-embedding-3-small")
+embed_model = OpenAIEmbeddings(model="text-embedding-ada-002")
 
 def create_index_knowledge(indexName: str):
     # Konfigurasi klien Pinecone
