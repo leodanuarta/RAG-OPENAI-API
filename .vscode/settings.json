@@ -2,6 +2,7 @@
     "cSpell.words": [
         "dotenv",
         "langchain",
-        "openai"
+        "openai",
+        "pdfplumber"
     ]
 }

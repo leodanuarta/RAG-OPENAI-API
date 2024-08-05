@@ -1,3 +1,6 @@
 venv/
 /.env.local
 .env
+ragasenv/
+*.xlsx
+*.csv

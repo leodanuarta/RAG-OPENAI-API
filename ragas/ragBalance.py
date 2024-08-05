@@ -16,12 +16,11 @@ from datasets import load_dataset
 # import fitz  # PyMuPDF
 import openai
 from PyPDF2 import PdfReader
-# from dotenv import load_dotenv
+from flask_cors import CORS
+from dotenv import load_dotenv
+import ragas  # Import RAGAS library
 
-from ragas.testset.generator import TestsetGenerator
-from ragas.testset.evolutions import simple, reasoning, multi_context
-
-# load_dotenv()
+load_dotenv()
 
 # Inisialisasi aplikasi Flask
 app = Flask(__name__)
@@ -38,8 +37,7 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # Inisialisasi model chat
 chat = ChatOpenAI(
     openai_api_key=os.getenv("OPENAI_API_KEY"),
-    model="gpt-4",
-    temperature=0
+    model="gpt-3.5-turbo"
 )
 
 # Pesan awal
@@ -47,7 +45,7 @@ initial_messages = [
     SystemMessage(content="You are a helpful assistant."),
     HumanMessage(content="Hi AI, how are you today ?"),
     AIMessage(content="I'm great, thank you. How can I help you ?"),
-    # HumanMessage(content="I'd like to understand string theory.")
+    HumanMessage(content="I'd like to understand string theory.")
 ]
 
 # Embedding model
@@ -266,18 +264,12 @@ def augment_prompt_with_score(query: str, indexname: str, namespace: str):
     source_knowledge = "\n".join([f"Context : {x.page_content}, Score: {score}" for x, score in results])
 
     # augmented_prompt = f"""You are a helpful assistant. If the question below requires specific knowledge, use the context provided. Otherwise, answer the question directly.
-    # augmented_prompt = f"""You are a trained education assistant. Use the context provided with score upper 0.5 and answer the question directly. Otherwise, answer Maaf RAGibran tidak mengerti atau silahkan chat di topik yang berbeda.
-    augmented_prompt = f"""You are an assistant for question-answering tasks. 
-                            Use the following pieces of retrieved context to answer the question. 
-                            If you don't know the answer, just say that you don't know. 
-                            Use two sentences maximum and keep the answer concise.
-                            Answer:
+    augmented_prompt = f"""You are a trained education assistant. Use the context provided with score upper 0.5 and answer the question directly. Otherwise, answer Maaf RAGibran tidak mengerti atau silahkan chat di topik yang berbeda.
 
-                            Contexts:
-                            {source_knowledge}
+    Contexts:
+    {source_knowledge}
 
-                            Query: {query}
-                        """
+    Query: {query}"""
     return augmented_prompt, results
 
 def augment_prompt(query: str, indexname: str, namespace: str):
@@ -293,18 +285,6 @@ def augment_prompt(query: str, indexname: str, namespace: str):
 
     Query: {query}"""
     return augmented_prompt
-
-def ragas_querying_question_with_score(query: str,indexname: str, namespace: str ):
-    # Hybrid prompting approach
-    # prompt = HumanMessage(content=augment_prompt(query, indexname, namespace))
-    augment_prompt_content, results = augment_prompt_with_score(query, indexname, namespace)
-    prompt = HumanMessage(content=augment_prompt_content)
-
-    search_result = [{"content" : x.page_content, "score" : score} for x, score in results]
-
-    response = chat(initial_messages + [prompt])
-
-    return response.content, search_result[0]
 
 @app.route("/tanyalabirascore", methods=["POST"])
 def querying_question_with_score():
@@ -331,7 +311,13 @@ def querying_question_with_score():
 
     response = chat(initial_messages + [prompt])
     # return jsonify({'text': response.content}), 200
-    return jsonify({"text" : response.content, "score" : search_result}), 200
+    # return jsonify({"text" : response.content, "score" : search_result}), 200
+
+    # RAGAS EVALUATION
+    metrics = ["recall", "precision", "f1"]
+    ragas_score = ragas.evaluate(response.content, search_result, metrics=metrics)
+    return jsonify({"text": response.content, "score": search_result, "ragas_score": ragas_score}), 200
+
 
 @app.route("/tanyalabira", methods=["POST"])
 def querying_question():
