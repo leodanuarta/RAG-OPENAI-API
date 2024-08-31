@@ -77,7 +77,7 @@ def create_index_knowledge(indexName: str):
     index.describe_index_stats()
     return index
 
-@app.route("/trainlabira", methods=["GET"])
+@app.route("/v1/trainlabira", methods=["GET"])
 def upsert_knowledge():
     index = create_index_knowledge()
     # Dummy data
@@ -162,7 +162,7 @@ def recursive_chunk(segment, embed_model, max_payload_size=40960):
 
     return final_chunks, final_embeddings
 
-@app.route('/kasihlabira', methods=["POST"])
+@app.route('/v1/kasihlabira', methods=["POST"])
 def upsert_knowledge_pdf():
     openai.api_key = os.getenv('OPENAI_API_KEY')
     
@@ -306,7 +306,7 @@ def ragas_querying_question_with_score(query: str,indexname: str, namespace: str
 
     return response.content, search_result[0]
 
-@app.route("/tanyalabirascore", methods=["POST"])
+@app.route("/v1/tanyalabirascore", methods=["POST"])
 def querying_question_with_score():
     body = request.get_json()
     query = body.get("question")
@@ -333,7 +333,7 @@ def querying_question_with_score():
     # return jsonify({'text': response.content}), 200
     return jsonify({"text" : response.content, "score" : search_result}), 200
 
-@app.route("/tanyalabira", methods=["POST"])
+@app.route("/v1/tanyalabira", methods=["POST"])
 def querying_question():
     body = request.get_json()
     query = body.get("question")
@@ -356,7 +356,7 @@ def querying_question():
     return jsonify({'text': response.content}), 200
 
 
-@app.route("/hellorag", methods=["GET"])
+@app.route("/v1/hellorag", methods=["GET"])
 def index():
     return jsonify({'Text': 'Hello From RAG Labira :)'}, 200)
 if __name__ == "__main__":
